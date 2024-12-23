@@ -9,12 +9,15 @@ import (
 	"os"
 	"time"
 
+	"dopolytech.fr/m/telemetry"
+
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
 )
 
 type Config struct {
@@ -116,6 +119,13 @@ func metricsMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	// Initialize tracer
+	tp, err := telemetry.InitTracer()
+	if err != nil {
+		log.Fatalf("Failed to initialize tracer: %v", err)
+	}
+	defer telemetry.Shutdown(tp)
+
 	config := getConfig()
 
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
@@ -132,9 +142,16 @@ func main() {
 	http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
+		// Start the span for this request
+		ctx := r.Context()
+		tracer := otel.Tracer("inventory-service")
+		ctx, span := tracer.Start(ctx, "get_items")
+		defer span.End()
+
 		start := time.Now()
-		rows, err := db.Query("SELECT id, name, price FROM items")
+		rows, err := db.QueryContext(ctx, "SELECT id, name, price FROM items")
 		if err != nil {
+			span.RecordError(err)
 			http.Error(w, "Database query failed", http.StatusInternalServerError)
 			return
 		}
@@ -144,6 +161,7 @@ func main() {
 		for rows.Next() {
 			var item Item
 			if err := rows.Scan(&item.ID, &item.Name, &item.Price); err != nil {
+				span.RecordError(err)
 				http.Error(w, "Error scanning data", http.StatusInternalServerError)
 				return
 			}
@@ -154,6 +172,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(items); err != nil {
+			span.RecordError(err)
 			http.Error(w, "Error encoding data", http.StatusInternalServerError)
 		}
 	})
