@@ -1,0 +1,78 @@
+loki.relabel "journal" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+}
+
+prometheus.exporter.cadvisor "docker" {
+	docker_host      = "unix:///var/run/docker.sock"
+	storage_duration = "5m"
+}
+
+prometheus.exporter.postgres "postgres" {
+	data_source_names = ["postgresql://inventory:inventory@postgres:5432/database_name?sslmode=disable"]
+}
+
+prometheus.exporter.unix "demo" { }
+
+loki.source.syslog "local" {
+	listener {
+		address = "127.0.0.1:51893"
+		labels  = {component = "loki.source.syslog", protocol = "tcp"}
+	}
+
+	listener {
+		address  = "127.0.0.1:51898"
+		protocol = "udp"
+		labels   = {component = "loki.source.syslog", protocol = "udp"}
+	}
+
+	forward_to = [loki.write.demo.receiver]
+}
+
+loki.source.journal "read" {
+	forward_to    = [loki.write.demo.receiver]
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {component = "loki.source.journal"}
+}
+
+discovery.docker "linux" {
+	host = "unix:///var/run/docker.sock"
+}
+
+loki.source.docker "default" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.docker.linux.targets
+	labels     = {"app" = "docker"}
+	forward_to = [loki.write.demo.receiver]
+}
+
+prometheus.scrape "cadvisor_scraper" {
+	targets    = prometheus.exporter.cadvisor.docker.targets
+	forward_to = [prometheus.remote_write.demo.receiver]
+}
+
+prometheus.scrape "postgres_scraper" {
+	targets    = prometheus.exporter.postgres.postgres.targets
+	forward_to = [prometheus.remote_write.demo.receiver]
+}
+
+prometheus.scrape "unix_scraper" {
+	targets    = prometheus.exporter.unix.demo.targets
+	forward_to = [prometheus.remote_write.demo.receiver]
+}
+
+prometheus.remote_write "demo" {
+	endpoint {
+		url = "http://localhost:9090/api/v1/push"
+	}
+}
+
+loki.write "demo" {
+	endpoint {
+		url = "http://localhost:3100/loki/api/v1/push"
+	}
+}
